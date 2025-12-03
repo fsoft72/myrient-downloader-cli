@@ -9,16 +9,18 @@ from urllib.parse import urljoin, unquote, urlparse
 from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical, Horizontal
-from textual.widgets import Header, Footer, ListView, ListItem, Label, Input, Button, ProgressBar, Static
+from textual.widgets import Header, Footer, ListView, ListItem, Label, Input, Button, ProgressBar, Static, DataTable
 from textual.screen import Screen, ModalScreen
 from textual.binding import Binding
 from textual.worker import Worker, get_current_worker
 from textual import work
 from textual.reactive import reactive
 from textual.message import Message
+from rich.text import Text
 
 BASE_URL = "https://myrient.erista.me/files/"
 SETTINGS_FILE = "settings.json"
+VERSION = "0.2.0"
 
 class SettingsScreen(ModalScreen):
     BINDINGS = [("escape", "close_settings", "Close")]
@@ -46,22 +48,8 @@ class SettingsScreen(ModalScreen):
     def action_close_settings(self):
         self.dismiss(None)
 
-class FileListItem(ListItem):
-    def __init__(self, name, is_dir, href, size=""):
-        super().__init__()
-        self.entry_name = name
-        self.is_dir = is_dir
-        self.href = href
-        self.file_size = size
-
-    def compose(self) -> ComposeResult:
-        icon = "📁 " if self.is_dir else "📄 "
-        display_text = f"{icon}{self.entry_name}"
-        if self.file_size and self.file_size != "-":
-            display_text += f"  [{self.file_size}]"
-        yield Label(display_text)
-
 class MyrientDownloader(App):
+    TITLE = f"Myrient Downloader v{VERSION}"
     CSS = """
     #settings-dialog {
         padding: 1;
@@ -78,7 +66,7 @@ class MyrientDownloader(App):
     Button {
         margin: 1;
     }
-    ListView {
+    DataTable {
         border: solid blue;
         height: 1fr;
     }
@@ -111,9 +99,28 @@ class MyrientDownloader(App):
     destination_folder = reactive(os.getcwd())
     download_queue = []
     is_downloading = reactive(False)
+    is_loading_dir = reactive(False)
     current_download_worker = None
     last_esc_time = 0
     last_q_time = 0
+
+    def watch_is_loading_dir(self, value: bool) -> None:
+        progress_bar = self.query_one("#progress", ProgressBar)
+        status_text = self.query_one("#status-text", Label)
+        
+        if value:
+            if not self.is_downloading:
+                progress_bar.display = True
+                progress_bar.total = None # Indeterminate
+                status_text.update("Loading directory...")
+        else:
+            if not self.is_downloading:
+                progress_bar.display = False
+                progress_bar.total = 100
+                status_text.update("Ready")
+            else:
+                # Restore download status if needed
+                pass
 
     def show_error(self, message):
         self.notify(message, severity="error")
@@ -122,7 +129,7 @@ class MyrientDownloader(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Label(f"Current: {self.current_url}", id="url-label")
-        yield ListView(id="file-list")
+        yield DataTable(id="file-list", cursor_type="row")
         with Container(id="status-bar"):
             yield Label("Ready", id="status-text")
             yield ProgressBar(total=100, show_eta=True, id="progress")
@@ -130,7 +137,9 @@ class MyrientDownloader(App):
 
     def on_mount(self):
         self.load_settings()
-        self.load_directory(self.current_url)
+        table = self.query_one("#file-list", DataTable)
+        table.add_columns("Name", "Size")
+        self.load_directory_worker(self.current_url)
 
     def load_settings(self):
         try:
@@ -206,36 +215,55 @@ class MyrientDownloader(App):
             
         return items
 
-    def load_directory(self, url):
+    @work(thread=True)
+    def load_directory_worker(self, url):
+        self.app.call_from_thread(setattr, self, "is_loading_dir", True)
         try:
             response = requests.get(url)
             response.raise_for_status()
             
             items = self.parse_directory_html(response.text, url)
             
-            list_view = self.query_one("#file-list", ListView)
-            list_view.clear()
-            
-            # Update URL label
-            self.query_one("#url-label", Label).update(f"Current: {url}")
-
             # Sort: directories first, then files
             items.sort(key=lambda x: (not x[1], x[0]))
 
-            for text, is_dir, full_url, size in items:
-                list_view.append(FileListItem(text, is_dir, full_url, size))
+            def update_ui():
+                table = self.query_one("#file-list", DataTable)
+                table.clear()
                 
-            list_view.focus()
+                # Update URL label
+                self.query_one("#url-label", Label).update(f"Current: {url}")
+
+                self.row_data = {} # Reset the lookup
+                
+                for text_content, is_dir, full_url, size in items:
+                    icon = "📁 " if is_dir else "📄 "
+                    display_name = Text(icon)
+                    display_name.append(text_content)
+                    
+                    row_key = table.add_row(display_name, size)
+                    self.row_data[row_key] = (text_content, is_dir, full_url)
+                    
+                table.focus()
+            
+            self.app.call_from_thread(update_ui)
 
         except Exception as e:
-            self.show_error(f"Error loading directory: {e}")
+            self.app.call_from_thread(self.show_error, f"Error loading directory: {e}")
+        finally:
+            self.app.call_from_thread(setattr, self, "is_loading_dir", False)
 
-    def on_list_view_selected(self, event: ListView.Selected):
-        item = event.item
-        if isinstance(item, FileListItem):
-            if item.is_dir:
-                self.current_url = item.href
-                self.load_directory(self.current_url)
+    def load_directory(self, url):
+        # Deprecated, use load_directory_worker
+        self.load_directory_worker(url)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected):
+        row_key = event.row_key
+        if row_key in self.row_data:
+            name, is_dir, href = self.row_data[row_key]
+            if is_dir:
+                self.current_url = href
+                self.load_directory_worker(self.current_url)
             else:
                 self.notify("Press 'd' to download the folder content.", severity="information")
 
@@ -255,7 +283,7 @@ class MyrientDownloader(App):
             parent = BASE_URL
             
         self.current_url = parent
-        self.load_directory(self.current_url)
+        self.load_directory_worker(self.current_url)
 
     def action_handle_esc(self):
         now = time.time()
@@ -295,10 +323,10 @@ class MyrientDownloader(App):
 
         # Collect all items in current view (files AND dirs)
         items_to_process = []
-        list_view = self.query_one("#file-list", ListView)
-        for item in list_view.children:
-            if isinstance(item, FileListItem):
-                items_to_process.append((item.entry_name, item.is_dir, item.href))
+        # We can use self.row_data
+        for key, value in self.row_data.items():
+            name, is_dir, href = value
+            items_to_process.append((name, is_dir, href))
 
         if not items_to_process:
             self.notify("Nothing to download in this folder.", severity="warning")
@@ -324,7 +352,7 @@ class MyrientDownloader(App):
             name, is_dir, url = queue.pop(0)
 
             if is_dir:
-                status_label.update(f"Scanning: {name}")
+                status_label.update(Text(f"Scanning: {name}"))
                 try:
                     response = requests.get(url)
                     response.raise_for_status()
@@ -337,7 +365,7 @@ class MyrientDownloader(App):
                 continue
 
             # It is a file
-            status_label.update(f"Downloading: {name} (Queue: {len(queue)})")
+            status_label.update(Text(f"Downloading: {name} (Queue: {len(queue)})"))
             
             # Calculate path based on URL
             if not url.startswith(BASE_URL):
