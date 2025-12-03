@@ -16,23 +16,26 @@ This tool allows you to browse the Myrient file repository directly from your te
 
 ## Installation
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/yourusername/myrient-downloader.git
-    cd myrient-downloader
-    ```
+You can install the package directly using pip:
 
-2.  Install the required dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+```bash
+pip install myrient-downloader-cli
+```
+
+Or build and install locally from source:
+
+```bash
+git clone https://github.com/yourusername/myrient-downloader-cli.git
+cd myrient-downloader-cli
+pip install .
+```
 
 ## Usage
 
-Run the script:
+Run the application using the command line interface:
 
 ```bash
-python3 myrient_dl.py
+myrient-cli
 ```
 
 ### Controls
@@ -41,11 +44,12 @@ python3 myrient_dl.py
 | :--- | :--- |
 | `↑` / `↓` | Navigate the file list |
 | `Enter` | Open selected folder |
-| `Del` / `Esc` | Go to parent folder |
-| `d` | **Download** current folder content (recursive) |
+| `Backspace` | Go to parent folder |
+| `Ctrl+d` | **Download** current folder content (recursive) |
 | `?` | Open **Settings** (change destination) |
-| `Esc` (x2) | **Stop** active download |
-| `q` (x2) | **Quit** application |
+| `Esc` | Go back / Stop active download (double press) |
+| `Ctrl+q` | **Quit** application |
+| `Type...` | **Type-ahead Search** (filters current view) |
 
 ## Configuration
 

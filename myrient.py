@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from rich.text import Text
 from textual import work
@@ -118,7 +120,6 @@ class MyrientDownloader(App):
     is_loading_dir = reactive(False)
     current_download_worker = None
     last_esc_time = 0
-    last_q_time = 0
 
     search_query = ""
     last_search_time = 0
@@ -317,10 +318,11 @@ class MyrientDownloader(App):
                 self.current_url = href
                 self.load_directory_worker(self.current_url)
             else:
-                self.notify(
-                    "Press 'Ctrl+d' to download the folder content.",
-                    severity="information",
-                )
+                if self.is_downloading:
+                    self.notify("Download in progress. Please wait.", severity="warning")
+                else:
+                    self.download_queue = [(name, is_dir, href)]
+                    self.start_download_worker()
 
     def action_go_up(self):
         if self.current_url == BASE_URL:
@@ -361,12 +363,7 @@ class MyrientDownloader(App):
         self.last_esc_time = now
 
     def action_handle_quit(self):
-        now = time.time()
-        if now - self.last_q_time < 0.5:
-            self.exit()
-        else:
-            self.notify("Press 'Ctrl+q' again to quit", severity="information")
-        self.last_q_time = now
+        self.exit()
 
     def on_key(self, event: Key) -> None:
         if self.is_loading_dir or self.is_downloading:
@@ -436,95 +433,136 @@ class MyrientDownloader(App):
         self.download_queue = items_to_process
         self.start_download_worker()
 
+    def get_retry_session(self, retries=5, backoff_factor=0.5):
+        session = requests.Session()
+        retry = Retry(
+            total=retries,
+            read=retries,
+            connect=retries,
+            backoff_factor=backoff_factor,
+            status_forcelist=(500, 502, 504),
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
     @work(thread=True, exclusive=True)
     def start_download_worker(self):
         self.is_downloading = True
         self.query_one("#status-bar").add_class("downloading")
         progress_bar = self.query_one("#progress", ProgressBar)
+        progress_bar.display = True
         status_label = self.query_one("#status-text", Label)
 
-        queue = list(self.download_queue)
-        worker = get_current_worker()
+        try:
+            queue = list(self.download_queue)
+            worker = get_current_worker()
+            session = self.get_retry_session()
 
-        while queue:
-            if worker.is_cancelled:
-                break
+            while queue:
+                if worker.is_cancelled:
+                    return
 
-            name, is_dir, url = queue.pop(0)
+                name, is_dir, url = queue.pop(0)
 
-            if is_dir:
-                status_label.update(Text(f"Scanning: {name}"))
-                try:
-                    response = requests.get(url)
-                    response.raise_for_status()
-                    items = self.parse_directory_html(response.text, url)
-                    # Add to queue
-                    for item_name, item_is_dir, item_url, _ in items:
-                        queue.append((item_name, item_is_dir, item_url))
-                except Exception as e:
-                    self.show_error(f"Error scanning {name}: {e}")
-                continue
+                if is_dir:
+                    status_label.update(Text(f"Scanning: {name}"))
+                    try:
+                        response = session.get(url, timeout=30)
+                        response.raise_for_status()
+                        items = self.parse_directory_html(response.text, url)
+                        # Add to queue
+                        for item_name, item_is_dir, item_url, _ in items:
+                            queue.append((item_name, item_is_dir, item_url))
+                    except Exception as e:
+                        self.show_error(f"Error scanning {name}: {e}")
+                    continue
 
-            # It is a file
-            status_label.update(Text(f"Downloading: {name} (Queue: {len(queue)})"))
+                # It is a file
+                status_label.update(Text(f"Downloading: {name} (Queue: {len(queue)})"))
 
-            # Calculate path based on URL
-            if not url.startswith(BASE_URL):
-                continue
+                # Calculate path based on URL
+                if not url.startswith(BASE_URL):
+                    continue
 
-            rel_path = url[len(BASE_URL) :]
-            rel_path = unquote(rel_path)
-            filepath = os.path.join(self.destination_folder, rel_path)
+                rel_path = url[len(BASE_URL) :]
+                rel_path = unquote(rel_path)
+                filepath = os.path.join(self.destination_folder, rel_path)
 
-            # Ensure dir exists
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                # Ensure dir exists
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
-            # Resume logic
-            resume_header = {}
-            mode = "wb"
-            downloaded = 0
+                # Retry loop for file download
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # Resume logic
+                        resume_header = {}
+                        mode = "wb"
+                        downloaded = 0
 
-            if os.path.exists(filepath):
-                downloaded = os.path.getsize(filepath)
-                try:
-                    head_resp = requests.head(url, allow_redirects=True)
-                    total_size = int(head_resp.headers.get("content-length", 0))
+                        if os.path.exists(filepath):
+                            downloaded = os.path.getsize(filepath)
+                            try:
+                                head_resp = session.head(url, allow_redirects=True, timeout=30)
+                                total_size = int(head_resp.headers.get("content-length", 0))
 
-                    if downloaded >= total_size and total_size > 0:
-                        # self.notify(f"Skipping {name} (already exists)")
-                        continue
+                                if downloaded >= total_size and total_size > 0:
+                                    # Already done
+                                    break
 
-                    if downloaded > 0:
-                        resume_header = {"Range": f"bytes={downloaded}-"}
-                        mode = "ab"
-                except:
-                    pass
+                                if downloaded > 0:
+                                    resume_header = {"Range": f"bytes={downloaded}-"}
+                                    mode = "ab"
+                            except:
+                                pass
 
-            try:
-                with requests.get(url, stream=True, headers=resume_header) as r:
-                    r.raise_for_status()
-                    total_length = int(r.headers.get("content-length", 0))
+                        with session.get(url, stream=True, headers=resume_header, timeout=30) as r:
+                            r.raise_for_status()
+                            
+                            # Check if range was accepted
+                            if r.status_code != 206:
+                                mode = "wb"
+                                downloaded = 0
 
-                    if mode == "ab":
-                        total_length += downloaded
+                            total_length = int(r.headers.get("content-length", 0))
 
-                    progress_bar.update(total=total_length, progress=downloaded)
+                            if mode == "ab":
+                                total_length += downloaded
 
-                    with open(filepath, mode) as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            if worker.is_cancelled:
-                                break
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                progress_bar.update(progress=downloaded)
-            except Exception as e:
-                self.show_error(f"Error downloading {name}: {e}")
+                            progress_bar.update(total=total_length, progress=downloaded)
 
-        self.is_downloading = False
-        self.query_one("#status-bar").remove_class("downloading")
-        status_label.update("Ready")
-        self.notify("Download finished!")
+                            with open(filepath, mode) as f:
+                                for chunk in r.iter_content(chunk_size=8192):
+                                    if worker.is_cancelled:
+                                        return
+                                    if chunk:
+                                        f.write(chunk)
+                                        downloaded += len(chunk)
+                                        progress_bar.update(progress=downloaded)
+                        
+                        # Success
+                        break
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            self.show_error(f"Failed to download {name}: {e}")
+                        else:
+                            time.sleep(1)
+                            continue
+
+            self.is_downloading = False
+            self.query_one("#status-bar").remove_class("downloading")
+            progress_bar.display = False
+            status_label.update("Ready")
+            self.notify("Download finished!")
+
+        except Exception as e:
+            self.show_error(f"Download worker crashed: {e}")
+            self.is_downloading = False
+            self.query_one("#status-bar").remove_class("downloading")
+            progress_bar.display = False
+            status_label.update("Error")
 
     def stop_download(self):
         # Cancel the worker
