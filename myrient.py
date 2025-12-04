@@ -8,9 +8,8 @@ from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
@@ -33,10 +32,11 @@ from textual.widgets import (
     Static,
 )
 from textual.worker import Worker, get_current_worker
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://myrient.erista.me/files/"
 SETTINGS_FILE = "settings.json"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 
 class SettingsScreen(ModalScreen):
@@ -108,7 +108,7 @@ class MyrientDownloader(App):
     BINDINGS = [
         Binding("ctrl+d", "download_folder", "Download Folder"),
         Binding("?", "open_settings", "Settings"),
-        Binding("escape", "handle_esc", "Back/Stop"),
+        Binding("escape", "handle_esc", "Stop/Clear"),
         Binding("backspace", "go_up", "Up"),
         Binding("ctrl+q", "handle_quit", "Quit"),
     ]
@@ -319,7 +319,9 @@ class MyrientDownloader(App):
                 self.load_directory_worker(self.current_url)
             else:
                 if self.is_downloading:
-                    self.notify("Download in progress. Please wait.", severity="warning")
+                    self.notify(
+                        "Download in progress. Please wait.", severity="warning"
+                    )
                 else:
                     self.download_queue = [(name, is_dir, href)]
                     self.start_download_worker()
@@ -356,9 +358,7 @@ class MyrientDownloader(App):
                 self.stop_download()
         else:
             # Single ESC
-            if not self.is_downloading:
-                self.action_go_up()
-            else:
+            if self.is_downloading:
                 self.notify("Press ESC again to stop download", severity="warning")
         self.last_esc_time = now
 
@@ -467,7 +467,12 @@ class MyrientDownloader(App):
                 name, is_dir, url = queue.pop(0)
 
                 if is_dir:
-                    status_label.update(Text(f"Scanning: {name}"))
+                    scan_path = (
+                        unquote(url[len(BASE_URL) :])
+                        if url.startswith(BASE_URL)
+                        else url
+                    )
+                    status_label.update(Text(f"Scanning: {scan_path}"))
                     try:
                         response = session.get(url, timeout=30)
                         response.raise_for_status()
@@ -505,8 +510,12 @@ class MyrientDownloader(App):
                         if os.path.exists(filepath):
                             downloaded = os.path.getsize(filepath)
                             try:
-                                head_resp = session.head(url, allow_redirects=True, timeout=30)
-                                total_size = int(head_resp.headers.get("content-length", 0))
+                                head_resp = session.head(
+                                    url, allow_redirects=True, timeout=30
+                                )
+                                total_size = int(
+                                    head_resp.headers.get("content-length", 0)
+                                )
 
                                 if downloaded >= total_size and total_size > 0:
                                     # Already done
@@ -518,9 +527,11 @@ class MyrientDownloader(App):
                             except:
                                 pass
 
-                        with session.get(url, stream=True, headers=resume_header, timeout=30) as r:
+                        with session.get(
+                            url, stream=True, headers=resume_header, timeout=30
+                        ) as r:
                             r.raise_for_status()
-                            
+
                             # Check if range was accepted
                             if r.status_code != 206:
                                 mode = "wb"
@@ -541,7 +552,7 @@ class MyrientDownloader(App):
                                         f.write(chunk)
                                         downloaded += len(chunk)
                                         progress_bar.update(progress=downloaded)
-                        
+
                         # Success
                         break
                     except Exception as e:

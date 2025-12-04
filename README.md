@@ -1,4 +1,4 @@
-# Myrient Downloader
+# Myrient Downloader CLI
 
 A terminal-based (TUI) downloader for [Myrient](https://myrient.erista.me/), written in Python using the [Textual](https://textual.textualize.io/) framework.
 
@@ -43,13 +43,13 @@ myrient-cli
 | Key | Action |
 | :--- | :--- |
 | `↑` / `↓` | Navigate the file list |
-| `Enter` | Open selected folder |
+| `Type...` | **Type-ahead Search** (filters current view) |
+| `Enter` | Open selected folder / Download current file|
 | `Backspace` | Go to parent folder |
 | `Ctrl+d` | **Download** current folder content (recursive) |
 | `?` | Open **Settings** (change destination) |
-| `Esc` | Go back / Stop active download (double press) |
+| `Esc` | Stop active download (fast double press) |
 | `Ctrl+q` | **Quit** application |
-| `Type...` | **Type-ahead Search** (filters current view) |
 
 ## Configuration
 
